@@ -1,0 +1,27 @@
+{
+  "name": "worker",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir build --target node",
+    "start": "bun run build/index.js",
+    "lint": "eslint src/**/*.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "bull": "^4.11.3",
+    "redis": "^4.6.9",
+    "@agentic-sales-platform/database": "workspace:*",
+    "@agentic-sales-platform/ai-engine": "workspace:*",
+    "@agentic-sales-platform/crm-connectors": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.8.3",
+    "eslint": "^8.51.0",
+    "typescript": "^5.2.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5.2.2"
+  }
+}

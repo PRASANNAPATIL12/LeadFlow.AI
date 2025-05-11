@@ -1,0 +1,24 @@
+{
+  "name": "@agentic-sales-platform/crm-connectors",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "lint": "eslint \"**/*.ts*\"",
+    "build": "tsup src/index.ts --dts",
+    "dev": "tsup src/index.ts --dts --watch"
+  },
+  "dependencies": {
+    "axios": "^1.5.1",
+    "@agentic-sales-platform/database": "workspace:*"
+  },
+  "devDependencies": {
+    "eslint": "^8.51.0",
+    "tsup": "^7.2.0",
+    "typescript": "^5.2.2"
+  },
+  "files": [
+    "dist"
+  ]
+}
