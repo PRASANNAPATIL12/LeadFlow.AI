@@ -1,135 +1,141 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+import axios from 'axios';
 
-// Generic fetch wrapper with error handling
-async function fetchWithAuth(endpoint: string, options: RequestInit = {}) {
-  // Get the auth token from local storage
-  const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
-  
-  // Add auth headers if token exists
-  const headers = {
+// Create an axios instance with default settings
+export const api = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api',
+  headers: {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...options.headers,
-  };
+  },
+});
 
-  try {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      ...options,
-      headers,
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => null);
-      throw new Error(errorData?.message || `API error: ${response.status}`);
+// Add a request interceptor for authentication
+api.interceptors.request.use(
+  (config) => {
+    // Check if localStorage is available (client-side)
+    if (typeof window !== 'undefined') {
+      const token = localStorage.getItem('token');
+      if (token) {
+        config.headers['Authorization'] = `Bearer ${token}`;
+      }
     }
-
-    return await response.json();
-  } catch (error) {
-    console.error(`API request failed: ${endpoint}`, error);
-    throw error;
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
   }
-}
+);
 
-// Lead API functions
-export async function getLeads(filters = {}) {
-  const queryParams = new URLSearchParams();
-  
-  // Add filters to query params
-  Object.entries(filters).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      queryParams.append(key, String(value));
+// Add a response interceptor for error handling
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+    
+    // If error is 401 and not already retrying and localStorage is available
+    if (typeof window !== 'undefined' && error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+      
+      try {
+        // Try to refresh the token
+        const refreshToken = localStorage.getItem('refreshToken');
+        if (!refreshToken) {
+          console.error('No refresh token available for token refresh attempt.');
+          // Redirect to login or handle appropriately if no refresh token
+          localStorage.removeItem('token');
+          window.location.href = '/login';
+          return Promise.reject(new Error('No refresh token available'));
+        }
+        
+        const response = await axios.post(
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/auth/refresh-token`,
+          { refreshToken }
+        );
+        
+        const { token } = response.data;
+        localStorage.setItem('token', token);
+        
+        // Retry the original request with new token
+        originalRequest.headers['Authorization'] = `Bearer ${token}`;
+        return axios(originalRequest);
+      } catch (refreshError: any) {
+        // If refresh fails, redirect to login
+        console.error('Token refresh failed:', refreshError.response?.data || refreshError.message);
+        localStorage.removeItem('token');
+        localStorage.removeItem('refreshToken');
+        window.location.href = '/login'; // Ensure this path is correct for your app
+        return Promise.reject(refreshError);
+      }
     }
-  });
-
-  const queryString = queryParams.toString();
-  const endpoint = `/api/leads${queryString ? `?${queryString}` : ''}`;
-  
-  return fetchWithAuth(endpoint);
-}
-
-export async function getLeadById(id: string) {
-  return fetchWithAuth(`/api/leads/${id}`);
-}
-
-export async function getLeadStats() {
-  // Placeholder for now, as this endpoint is not fully defined in the API routes
-  // return fetchWithAuth('/api/leads/stats');
-  console.warn('getLeadStats is a placeholder and needs a corresponding API endpoint.');
-  return Promise.resolve({ totalLeads: 0, qualifiedLeads: 0, conversionRate: 0, averageScore: 0 });
-}
-
-export async function createLead(leadData) {
-  return fetchWithAuth('/api/leads', {
-    method: 'POST',
-    body: JSON.stringify(leadData),
-  });
-}
-
-export async function updateLead(id: string, leadData) {
-  return fetchWithAuth(`/api/leads/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(leadData),
-  });
-}
-
-export async function deleteLead(id: string) {
-  return fetchWithAuth(`/api/leads/${id}`, {
-    method: 'DELETE',
-  });
-}
-
-// AI Agent API functions
-export async function triggerLeadScoring(leadId: string) {
-  return fetchWithAuth(`/api/leads/${leadId}/score', { // Adjusted to match lead.routes.ts
-    method: 'POST',
-  });
-}
-
-export async function generateEmailForLead(leadId: string, templateId?: string) {
-  // This endpoint is not defined in the current API routes. Adding a placeholder.
-  console.warn('generateEmailForLead is a placeholder and needs a corresponding API endpoint.');
-  // return fetchWithAuth(`/api/ai/generate-email/${leadId}`, {
-  //   method: 'POST',
-  //   body: JSON.stringify({ templateId }),
-  // });
-  return Promise.resolve({ subject: 'Generated Email Subject', body: 'Generated email body...' });
-}
-
-export async function getAgentActions(leadId: string) {
-  // This endpoint is not defined in the current API routes. Adding a placeholder.
-  console.warn('getAgentActions is a placeholder and needs a corresponding API endpoint.');
-  // return fetchWithAuth(`/api/ai/actions?leadId=${leadId}`);
-  return Promise.resolve([]);
-}
-
-// Authentication functions
-export async function login(email: string, password: string) {
-  const response = await fetchWithAuth('/api/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ email, password }),
-    // headers are set by fetchWithAuth
-  });
-  
-  if (response.token && typeof window !== 'undefined') {
-    localStorage.setItem('auth_token', response.token);
+    
+    return Promise.reject(error);
   }
+);
+
+// API request helpers
+// It's good practice to type the params and data for these helpers if possible.
+export const apiHelpers = {
+  // Leads
+  getLeads: (params?: any) => api.get('/leads', { params }),
+  getLead: (id: string) => api.get(`/leads/${id}`),
+  createLead: (data: any) => api.post('/leads', data),
+  updateLead: (id: string, data: any) => api.put(`/leads/${id}`, data),
+  deleteLead: (id: string) => api.delete(`/leads/${id}`),
   
-  return response;
-}
-
-export async function logout() {
-  if (typeof window !== 'undefined') {
-    localStorage.removeItem('auth_token');
-  }
-  // Assuming logout is a POST, though not explicitly defined in auth.routes.ts
-  // return fetchWithAuth('/api/auth/logout', { method: 'POST' });
-  console.warn('logout is a placeholder and needs a corresponding API endpoint for server-side session invalidation.');
-  return Promise.resolve({ message: 'Logged out' });
-}
-
-export async function getCurrentUser() {
-  // This endpoint is not defined in the current API routes. Adding a placeholder.
-  console.warn('getCurrentUser is a placeholder and needs a corresponding API endpoint.');
-  // return fetchWithAuth('/api/auth/me');
-  return Promise.resolve(null); 
-}
+  // Activities
+  getActivities: (params?: any) => api.get('/activities', { params }),
+  createActivity: (data: any) => api.post('/activities', data),
+  
+  // Tasks
+  getTasks: (params?: any) => api.get('/tasks', { params }),
+  getTask: (id: string) => api.get(`/tasks/${id}`),
+  createTask: (data: any) => api.post('/tasks', data),
+  updateTask: (id: string, data: any) => api.put(`/tasks/${id}`, data),
+  deleteTask: (id: string) => api.delete(`/tasks/${id}`),
+  
+  // Analytics
+  getDashboardData: (params?: any) => api.get('/analytics/dashboard', { params }),
+  getLeadAnalytics: (params?: any) => api.get('/analytics/leads', { params }),
+  getCampaignAnalytics: (params?: any) => api.get('/analytics/campaigns', { params }),
+  
+  // Campaigns
+  getCampaigns: (params?: any) => api.get('/campaigns', { params }),
+  getCampaign: (id: string) => api.get(`/campaigns/${id}`),
+  createCampaign: (data: any) => api.post('/campaigns', data),
+  updateCampaign: (id: string, data: any) => api.put(`/campaigns/${id}`, data),
+  deleteCampaign: (id: string) => api.delete(`/campaigns/${id}`),
+  
+  // Auth
+  login: (credentials: { email: string, password: string }) => 
+    api.post('/auth/login', credentials),
+  register: (userData: any) => 
+    api.post('/auth/register', userData),
+  forgotPassword: (email: string) => 
+    api.post('/auth/forgot-password', { email }),
+  resetPassword: (token: string, password: string) => 
+    api.post('/auth/reset-password', { token, password }),
+  
+  // User
+  getCurrentUser: () => api.get('/users/me'),
+  updateProfile: (data: any) => api.put('/users/me', data),
+  
+  // Organizations
+  getOrganization: () => api.get('/organizations/current'),
+  updateOrganization: (data: any) => api.put('/organizations/current', data),
+  
+  // Integrations
+  getIntegrations: () => api.get('/integrations'),
+  connectIntegration: (type: string, credentials: any) => 
+    api.post(`/integrations/${type}/connect`, credentials),
+  disconnectIntegration: (type: string) => 
+    api.delete(`/integrations/${type}`),
+  
+  // AI Settings
+  getAISettings: () => api.get('/ai/settings'),
+  updateAISettings: (settings: any) => api.put('/ai/settings', settings),
+  
+  // Webhooks
+  getWebhooks: () => api.get('/webhooks'),
+  createWebhook: (data: any) => api.post('/webhooks', data),
+  updateWebhook: (id: string, data: any) => api.put(`/webhooks/${id}`, data),
+  deleteWebhook: (id: string) => api.delete(`/webhooks/${id}`),
+}; // Make sure this closing brace is present

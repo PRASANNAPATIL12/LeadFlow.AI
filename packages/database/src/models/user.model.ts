@@ -1,6 +1,5 @@
-// packages/database/src/models/user.model.ts
 import { Schema, model, Document } from 'mongoose';
-import bcrypt from 'bcryptjs'; // Changed from bcrypt to bcryptjs for wider Node.js compatibility without native compilation
+import bcrypt from 'bcrypt';
 
 export interface IUser extends Document {
   email: string;
@@ -9,11 +8,8 @@ export interface IUser extends Document {
   lastName: string;
   role: 'admin' | 'manager' | 'user';
   organizationId: Schema.Types.ObjectId;
-  lastLogin?: Date; // Made optional as default is null
+  lastLogin: Date;
   isActive: boolean;
-  companyName?: string; // Added to align with auth.controller.ts usage
-  title?: string;      // Added as it might be used by other parts (e.g. email agent)
-
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
 
@@ -58,23 +54,14 @@ const UserSchema = new Schema<IUser>(
       type: Boolean,
       default: true,
     },
-    companyName: { // Added field
-      type: String,
-      trim: true,
-    },
-    title: { // Added field
-        type: String,
-        trim: true,
-    }
   },
   {
-    timestamps: true, // This adds createdAt and updatedAt fields
+    timestamps: true,
   }
 );
 
 // Hash password before saving
 UserSchema.pre('save', async function (next) {
-  // Only hash the password if it has been modified (or is new)
   if (!this.isModified('password')) return next();
   
   try {

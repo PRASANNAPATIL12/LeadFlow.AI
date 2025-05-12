@@ -1,166 +1,189 @@
-import { Redis } from 'ioredis';
 import { Logger } from './logger';
 
-// Interface for what a memory record looks like. Adjust as needed.
 interface MemoryRecord {
   timestamp: string;
-  data: any; 
+  data: any;
 }
 
+/**
+ * Agent Memory system to store and retrieve context for AI agents
+ * This version uses an in-memory Map and localStorage for simple persistence.
+ */
 export class AgentMemory {
-  private redis: Redis;
+  private agentId: string;
+  private storageKey: string;
   private logger: Logger;
-  private ttlSeconds: number; // Time-to-live in seconds
-  private agentIdPrefix: string; // To namespace keys for different agents
+  private memoryStore: Map<string, MemoryRecord[]>;
+  private maxMemoryItems: number;
   
-  constructor(agentId: string, redisUrl?: string, ttlSeconds = 60 * 60 * 24 * 30) { // Default 30 day TTL
-    const url = redisUrl || process.env.REDIS_URL || 'redis://localhost:6379';
-    this.redis = new Redis(url, { 
-        // Recommended: Add retry strategy for robustness
-        retryStrategy(times) {
-            const delay = Math.min(times * 50, 2000); // Exponential backoff
-            return delay;
-        },
-        maxRetriesPerRequest: 3 // Don't retry forever on a single command
-    });
+  constructor(agentId: string, maxMemoryItems: number = 10) {
+    this.agentId = agentId;
+    this.storageKey = `agent_memory_${this.agentId}`; // Use agentId in storageKey for uniqueness
     this.logger = new Logger(`AgentMemory:${agentId}`);
-    this.ttlSeconds = ttlSeconds;
-    this.agentIdPrefix = `agent:${agentId}:context`;
-
-    this.redis.on('error', (err) => {
-        this.logger.error(`Redis connection error for ${agentId}: ${err.message}`);
-    });
-    this.redis.on('connect', () => {
-        this.logger.info(`Successfully connected to Redis for ${agentId}`);
-    });
+    this.memoryStore = new Map<string, MemoryRecord[]>();
+    this.maxMemoryItems = maxMemoryItems > 0 ? maxMemoryItems : 1; // Ensure maxMemoryItems is at least 1
+    
+    // Initialize from persistent storage if available (client-side)
+    if (typeof window !== 'undefined') {
+      this.loadFromStorage();
+    }
   }
   
-  private formatKey(entityId: string): string {
-    return `${this.agentIdPrefix}:${entityId}`;
-  }
-
-  async getContext(entityId: string): Promise<any | null> { // Return type can be more specific if context structure is known
+  /**
+   * Save a memory item for a specific entity
+   */
+  async saveMemory(entityId: string, data: any): Promise<void> {
+    if (!entityId) {
+      this.logger.warn('Attempted to save memory with no entityId.');
+      return;
+    }
     try {
-      const key = this.formatKey(entityId);
-      const data = await this.redis.get(key);
+      const entityMemory = this.memoryStore.get(entityId) || [];
       
-      if (!data) {
-        this.logger.info(`No context found for entity ${entityId} with agent ${this.agentIdPrefix}`);
+      const newMemory: MemoryRecord = {
+        timestamp: new Date().toISOString(),
+        data
+      };
+      
+      // Add new memory to the beginning of the array (most recent first)
+      entityMemory.unshift(newMemory);
+      
+      // Limit the number of items
+      if (entityMemory.length > this.maxMemoryItems) {
+        // entityMemory.pop(); // Removes the oldest if unshift is used
+        entityMemory.splice(this.maxMemoryItems); // More explicit way to keep only maxMemoryItems
+      }
+      
+      this.memoryStore.set(entityId, entityMemory);
+      
+      // Persist to storage (client-side)
+      if (typeof window !== 'undefined') {
+        this.saveToStorage();
+      }
+      
+      this.logger.debug(`Memory saved for entity ${entityId}. Count: ${entityMemory.length}`);
+    } catch (error: any) {
+      this.logger.error(`Error saving memory for entity ${entityId}:`, error.message);
+      throw error; // Re-throw to allow caller to handle
+    }
+  }
+  
+  /**
+   * Get memory for a specific entity.
+   * If limit is not provided, returns the most recent memory's data.
+   * If limit is provided, returns an array of MemoryRecord objects up to that limit.
+   */
+  async getMemory(entityId: string, limit?: number): Promise<any | MemoryRecord[] | null> {
+    if (!entityId) {
+      this.logger.warn('Attempted to get memory with no entityId.');
+      return null;
+    }
+    try {
+      const entityMemory = this.memoryStore.get(entityId) || [];
+      
+      if (entityMemory.length === 0) {
+        this.logger.debug(`No memory found for entity ${entityId}`);
         return null;
       }
       
-      return JSON.parse(data);
-    } catch (error) {
-      this.logger.error(`Error retrieving context for entity ${entityId} (agent ${this.agentIdPrefix}): ${error.message}`);
-      return null; // Or rethrow depending on desired error handling
+      if (limit && limit > 0) {
+        return entityMemory.slice(0, limit);
+      }
+      
+      // Default: return just the most recent memory's data object
+      return entityMemory[0].data;
+
+    } catch (error: any) {
+      this.logger.error(`Error retrieving memory for entity ${entityId}:`, error.message);
+      throw error; // Re-throw to allow caller to handle
     }
   }
   
-  async updateContext(entityId: string, newContextData: any): Promise<void> {
+  /**
+   * Clear memory for a specific entity
+   */
+  async clearMemory(entityId: string): Promise<void> {
+    if (!entityId) {
+      this.logger.warn('Attempted to clear memory with no entityId.');
+      return;
+    }
     try {
-      const key = this.formatKey(entityId);
-      const existingContext = await this.getContext(entityId) || {};
-      
-      // Merge new data with existing data - this strategy might need adjustment
-      // depending on how you want to manage context (e.g., append, overwrite parts)
-      const updatedContext = {
-        ...existingContext,
-        ...newContextData,
-        lastUpdated: new Date().toISOString()
-      };
-      
-      await this.redis.set(
-        key,
-        JSON.stringify(updatedContext),
-        'EX', 
-        this.ttlSeconds
-      );
-      
-      this.logger.info(`Context updated for entity ${entityId} (agent ${this.agentIdPrefix})`);
-    } catch (error) {
-      this.logger.error(`Error updating context for entity ${entityId} (agent ${this.agentIdPrefix}): ${error.message}`);
-      throw new Error(`Failed to update memory for ${entityId}: ${error.message}`);
+      this.memoryStore.delete(entityId);
+      if (typeof window !== 'undefined') {
+        this.saveToStorage(); // Update persistent storage after clearing
+      }
+      this.logger.debug(`Memory cleared for entity ${entityId}`);
+    } catch (error: any) {
+      this.logger.error(`Error clearing memory for entity ${entityId}:`, error.message);
+      throw error;
     }
   }
   
-  async clearContext(entityId: string): Promise<void> {
+  /**
+   * Clear all memory for this agent
+   */
+  async clearAllMemory(): Promise<void> {
     try {
-      const key = this.formatKey(entityId);
-      const result = await this.redis.del(key);
-      if (result > 0) {
-        this.logger.info(`Context cleared for entity ${entityId} (agent ${this.agentIdPrefix})`);
+      this.memoryStore.clear();
+      if (typeof window !== 'undefined') {
+        this.saveToStorage(); // Update persistent storage after clearing all
+      }
+      this.logger.debug(`All memory cleared for agent ${this.agentId}`);
+    } catch (error: any) {
+      this.logger.error(`Error clearing all memory for agent ${this.agentId}:`, error.message);
+      throw error;
+    }
+  }
+  
+  /**
+   * Save memory to persistent storage (localStorage for browser environments)
+   */
+  private saveToStorage(): void {
+    if (typeof localStorage === 'undefined') {
+      this.logger.debug('localStorage not available. Skipping persistent save.');
+      return; // Not in a browser environment or localStorage is disabled
+    }
+    try {
+      // Convert Map to serializable object for localStorage
+      const serializedMemory: Record<string, MemoryRecord[]> = {};
+      this.memoryStore.forEach((value, key) => {
+        serializedMemory[key] = value;
+      });
+      
+      localStorage.setItem(this.storageKey, JSON.stringify(serializedMemory));
+      this.logger.debug(`Agent memory for ${this.agentId} persisted to localStorage.`);
+    } catch (error: any) {
+      this.logger.error(`Error saving agent memory to localStorage for ${this.agentId}:`, error.message);
+      // Depending on the error (e.g., QuotaExceededError), you might want to implement more sophisticated handling
+    }
+  }
+  
+  /**
+   * Load memory from persistent storage (localStorage for browser environments)
+   */
+  private loadFromStorage(): void {
+    if (typeof localStorage === 'undefined') {
+      this.logger.debug('localStorage not available. Skipping load from storage.');
+      return; // Not in a browser environment or localStorage is disabled
+    }
+    try {
+      const storedMemory = localStorage.getItem(this.storageKey);
+      if (storedMemory) {
+        const parsedMemory: Record<string, MemoryRecord[]> = JSON.parse(storedMemory);
+        this.memoryStore.clear(); // Clear current in-memory store before loading
+        for (const key in parsedMemory) {
+          if (Object.prototype.hasOwnProperty.call(parsedMemory, key)) {
+            this.memoryStore.set(key, parsedMemory[key]);
+          }
+        }
+        this.logger.info(`Agent memory for ${this.agentId} loaded from localStorage.`);
       } else {
-        this.logger.info(`No context found to clear for entity ${entityId} (agent ${this.agentIdPrefix})`);
+        this.logger.info(`No persistent memory found in localStorage for agent ${this.agentId}.`);
       }
-    } catch (error) {
-      this.logger.error(`Error clearing context for entity ${entityId} (agent ${this.agentIdPrefix}): ${error.message}`);
-    }
-  }
-  
-  // Summarization might be complex and LLM-dependent, so a simple version:
-  async summarizeContext(entityId: string, llmConnector: LLMConnector): Promise<void> {
-    try {
-      const context = await this.getContext(entityId);
-      if (!context || typeof context !== 'object' || Object.keys(context).length === 0) {
-        this.logger.info(`No context to summarize for ${entityId}`);
-        return;
-      }
-      
-      const contextString = JSON.stringify(context);
-      const contextSize = Buffer.from(contextString).length;
-
-      // Define a threshold for summarization, e.g., 10KB. Adjust as needed.
-      const SUMMARIZATION_THRESHOLD_BYTES = 10 * 1024; 
-
-      if (contextSize < SUMMARIZATION_THRESHOLD_BYTES) {
-        this.logger.info(`Context for ${entityId} is small enough (${contextSize} bytes), skipping summarization.`);
-        return;
-      }
-      
-      this.logger.info(`Summarizing large context (${contextSize} bytes) for entity ${entityId} (agent ${this.agentIdPrefix})`);
-      
-      const prompt = `
-Summarize the following B2B sales lead context. Focus on key decisions, recent interactions, and overall sentiment. Be concise.
-
-Context:
-${contextString}
-
-Provide a summary:
-`;
-
-      const summary = await llmConnector.complete(prompt);
-      
-      // Replace the old context with the summary and retain some recent, structured data if desired.
-      // This is a simple replacement strategy; more sophisticated strategies might be needed.
-      const newContext = {
-        summary: summary,
-        summaryTimestamp: new Date().toISOString(),
-        // Optionally, keep a few recent raw interactions if your structure allows
-        recentInteractions: Array.isArray(context.interactions) ? context.interactions.slice(-3) : [], 
-        lastScore: context.lastScoring?.score || context.lastScore, // Preserve last known score
-      };
-      
-      // Update with the new summarized context
-      const key = this.formatKey(entityId);
-      await this.redis.set(
-        key,
-        JSON.stringify(newContext),
-        'EX',
-        this.ttlSeconds
-      );
-      
-      this.logger.info(`Context summarized and updated for entity ${entityId} (agent ${this.agentIdPrefix})`);
-    } catch (error) {
-      this.logger.error(`Error summarizing context for entity ${entityId} (agent ${this.agentIdPrefix}): ${error.message}`);
-    }
-  }
-
-  async disconnect(): Promise<void> {
-    try {
-      await this.redis.quit();
-      this.logger.info(`Redis connection closed for agent ${this.agentIdPrefix}`);
-    } catch (error) {
-      this.logger.error(`Error disconnecting Redis for agent ${this.agentIdPrefix}: ${error.message}`);
+    } catch (error: any) {
+      this.logger.error(`Error loading agent memory from localStorage for ${this.agentId}:`, error.message);
+      // If parsing fails or data is corrupt, it might be good to clear the corrupted storage item
+      // localStorage.removeItem(this.storageKey);
     }
   }
 }

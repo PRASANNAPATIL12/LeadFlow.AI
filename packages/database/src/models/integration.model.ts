@@ -1,4 +1,3 @@
-// packages/database/src/models/integration.model.ts
 import { Schema, model, Document } from 'mongoose';
 
 export interface IIntegration extends Document {
@@ -12,18 +11,14 @@ export interface IIntegration extends Document {
     accessToken?: string;
     tokenExpiresAt?: Date;
     customFields?: Record<string, any>;
-    // For Salesforce username-password flow as seen in SalesforceConnector
-    username?: string;
-    passwordWithToken?: string; 
-    instanceUrl?: string;
   };
   settings: {
-    syncFrequencyHours: number; // Renamed from syncFrequency (in minutes) for clarity with crmSyncWorker usage
-    syncFields?: string[]; // Made optional
+    syncFrequency: number; // in minutes
+    syncFields: string[];
     syncDirection: 'push' | 'pull' | 'bidirectional';
     webhookUrl?: string;
   };
-  lastSyncAt?: Date; // Made optional as default is null
+  lastSyncAt: Date;
   status: 'active' | 'error' | 'pending' | 'disabled';
   errorMessage?: string;
 }
@@ -48,14 +43,11 @@ const IntegrationSchema = new Schema<IIntegration>(
       accessToken: String,
       tokenExpiresAt: Date,
       customFields: Schema.Types.Mixed,
-      username: String,
-      passwordWithToken: String,
-      instanceUrl: String,
     },
     settings: {
-      syncFrequencyHours: { // Renamed field
+      syncFrequency: {
         type: Number,
-        default: 1, // Default to 1 hour
+        default: 60, // 1 hour
       },
       syncFields: [String],
       syncDirection: {
@@ -73,15 +65,12 @@ const IntegrationSchema = new Schema<IIntegration>(
       type: String,
       enum: ['active', 'error', 'pending', 'disabled'],
       default: 'pending',
-    },
+    },\
     errorMessage: String,
   },
   {
-    timestamps: true, // This adds createdAt and updatedAt fields
+    timestamps: true,
   }
 );
-
-// Index for querying integrations by organization and type
-IntegrationSchema.index({ organizationId: 1, type: 1 });
 
 export const Integration = model<IIntegration>('Integration', IntegrationSchema);

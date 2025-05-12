@@ -2,273 +2,204 @@ import { LLMConnector } from '../utils/llmConnector';
 import { AgentMemory } from '../utils/agentMemory';
 import { Logger } from '../utils/logger';
 
-export interface LeadDataFromFrontend {
+interface LeadData {
   id: string;
   name: string;
-  company: string;
-  position?: string; // Made optional as per original definition
   email: string;
-  phone?: string;
+  company: string;
+  title?: string;
   industry?: string;
   companySize?: string;
   website?: string;
-  linkedIn?: string;
-  lastInteraction?: string; // Assuming this is a date string or description
-  interactions?: Interaction[];
-  crm_data?: any;
-  previousScores?: {
+  source: string;
+  notes?: string;
+  interactions?: Array<{
+    type: string;
     timestamp: string;
-    score: number;
-    reason: string;
-  }[];
+    content: string;
+    metadata?: Record<string, any>;
+  }>;
+  customFields?: Record<string, any>;
 }
 
-export interface Interaction {
-  type: 'email' | 'call' | 'meeting' | 'website_visit' | 'content_download';
-  timestamp: string;
-  details: string;
-  sentiment?: 'positive' | 'neutral' | 'negative';
-}
-
-export interface ScoringResult {
+interface ScoringResult {
   score: number;
-  confidence: number;
   reasoning: string;
-  nextActions: RecommendedAction[];
-  updatedAt: string;
-}
-
-export interface RecommendedAction {
-  type: 'email' | 'call' | 'meeting' | 'content_share';
-  priority: 'high' | 'medium' | 'low';
-  reason: string;
-  suggestedTiming: string;
+  recommendations: string[];
+  nextSteps: Array<{
+    action: string;
+    priority: 'high' | 'medium' | 'low';
+    details?: string;
+  }>;
 }
 
 export class LeadScoringAgent {
   private llm: LLMConnector;
   private memory: AgentMemory;
   private logger: Logger;
+  private scoringCriteria: Record<string, number>;
   
   constructor() {
-    // Initialize with default options, or allow configuration
-    this.llm = new LLMConnector(); 
-    this.memory = new AgentMemory('LeadScoringAgent'); // AgentMemory now expects an agentId
+    this.llm = new LLMConnector();
+    this.memory = new AgentMemory('lead-scoring');
     this.logger = new Logger('LeadScoringAgent');
+    
+    // Default scoring criteria - will be customizable by the organization
+    this.scoringCriteria = {
+      companySize: 20,
+      industry: 15,
+      engagement: 25,
+      timeliness: 10,
+      budget: 15,
+      needs: 15
+    };
   }
   
-  async scoreLead(leadData: LeadDataFromFrontend): Promise<ScoringResult> {
-    this.logger.info(`Scoring lead: ${leadData.id} - ${leadData.name} from ${leadData.company}`);
-    
+  /**
+   * Score a lead based on available data and interactions
+   */
+  async scoreLead(lead: LeadData): Promise<ScoringResult> {
     try {
-      // Retrieve previous context for this lead
-      const previousContext = await this.memory.getContext(leadData.id);
+      this.logger.info(`Scoring lead: ${lead.id} - ${lead.name}`);
+      
+      // Get previous context for this lead if available
+      const leadContext = await this.memory.getMemory(lead.id);
       
       // Prepare the prompt for the LLM
-      const prompt = this.buildScoringPrompt(leadData, previousContext);
+      const prompt = this.buildScoringPrompt(lead, leadContext);
       
-      // Get the LLM response
-      const llmResponse = await this.llm.complete(prompt);
-      
-      // Parse and validate the response
-      const scoringResult = this.parseScoringResponse(llmResponse);
-      
-      // Store the context and result
-      await this.memory.updateContext(leadData.id, {
-        lastScoring: scoringResult,
-        timestamp: new Date().toISOString(),
-        leadSnapshot: leadData // Storing a snapshot of the lead data at the time of scoring
+      // Get the scoring result from the LLM
+      // Assuming llm.complete takes an object with prompt, max_tokens, etc.
+      const llmResponse = await this.llm.complete({
+        prompt,
+        max_tokens: 1000,
+        temperature: 0.2,
+        // response_format: { type: "json" } // Ensure your LLMConnector supports this exact format or adapt
       });
       
-      this.logger.info(`Lead ${leadData.id} scored: ${scoringResult.score} with confidence ${scoringResult.confidence}`);
+      // Parse the response
+      // It's safer to try-catch JSON.parse and handle potential errors
+      let result: ScoringResult;
+      try {
+        // The user expects the LLM to return a JSON string based on the prompt.
+        // However, `llm.complete` might return a string that is not valid JSON or an object directly.
+        // Adjusting based on a common scenario where `complete` returns a string that needs parsing.
+        if (typeof llmResponse === 'string') {
+          result = JSON.parse(llmResponse);
+        } else if (typeof llmResponse === 'object' && llmResponse !== null) {
+          // If llmResponse is already an object, assume it matches ScoringResult structure
+          result = llmResponse as ScoringResult; 
+        } else {
+          throw new Error('LLM response is not a valid string or object.');
+        }
+      } catch (parseError: any) {
+        this.logger.error(`Error parsing LLM response for lead ${lead.id}:`, parseError);
+        this.logger.info(`Raw LLM Response for lead ${lead.id}:`, llmResponse);
+        throw new Error(`Failed to parse LLM scoring response: ${parseError.message}`);
+      }
       
-      return scoringResult;
-    } catch (error) {
-      this.logger.error(`Error scoring lead ${leadData.id}: ${error.message}`);
-      // Consider how to handle errors, e.g., return a default low score or throw
-      throw new Error(`Lead scoring failed: ${error.message}`);
+      // Store the result in memory for future context
+      await this.memory.saveMemory(lead.id, {
+        timestamp: new Date().toISOString(),
+        score: result.score,
+        reasoning: result.reasoning,
+        recommendations: result.recommendations
+      });
+      
+      this.logger.info(`Lead ${lead.id} scored: ${result.score}/100`);
+      
+      return result;
+    } catch (error: any) {
+      this.logger.error(`Error scoring lead ${lead.id}:`, error.message);
+      // To prevent crashing the entire process, consider returning a default/error result or re-throwing selectively
+      // For now, re-throwing as per original logic.
+      throw new Error(`Failed to score lead: ${error.message}`);
     }
   }
   
-  private buildScoringPrompt(leadData: LeadDataFromFrontend, previousContext: any): string {
-    // Build a comprehensive prompt
+  /**
+   * Build a prompt for the scoring model
+   */
+  private buildScoringPrompt(lead: LeadData, previousContext?: any): string {
     return `
-You are an expert B2B sales qualification AI. Analyze the following lead data and provide a lead score and next actions.
+You are an AI lead scoring specialist analyzing B2B sales leads for qualification.
 
-## Lead Information
-- Name: ${leadData.name}
-- Company: ${leadData.company}
-- Position: ${leadData.position || 'Unknown'}
-- Industry: ${leadData.industry || 'Unknown'}
-- Company Size: ${leadData.companySize || 'Unknown'}
-- Website: ${leadData.website || 'Not provided'}
-- LinkedIn: ${leadData.linkedIn || 'Not provided'}
+Your task is to score the following lead on a scale of 0-100 based on their fit and likelihood to convert.
 
-## Interaction History
-${this.formatInteractions(leadData.interactions)}
+LEAD INFORMATION:
+- Name: ${lead.name}
+- Company: ${lead.company}
+- Title: ${lead.title || 'Unknown'}
+- Industry: ${lead.industry || 'Unknown'}
+- Company Size: ${lead.companySize || 'Unknown'}
+- Source: ${lead.source}
+${lead.notes ? `- Notes: ${lead.notes}` : ''}
 
-## Previous Scoring Information
-${this.formatPreviousScores(leadData.previousScores)}
+${lead.interactions && lead.interactions.length > 0 
+  ? `INTERACTIONS:
+${lead.interactions.map(i => 
+      `- ${new Date(i.timestamp).toLocaleString()}: ${i.type} - ${i.content}`
+    ).join('
+')}`
+  : 'INTERACTIONS: None recorded'
+}
 
-## CRM Data
-${leadData.crm_data ? JSON.stringify(leadData.crm_data, null, 2) : 'No CRM data provided'}
+${lead.customFields ? `CUSTOM FIELDS:
+${Object.entries(lead.customFields).map(([key, value]) => 
+  `- ${key}: ${value}`
+).join('
+')}` : ''}
 
-## Previous Context from Agent Memory
-${previousContext ? JSON.stringify(previousContext, null, 2) : 'No previous context available'}
+${previousContext ? `PREVIOUS SCORING CONTEXT:
+${JSON.stringify(previousContext, null, 2)}` : ''}
 
----
+SCORING CRITERIA AND WEIGHTS:
+- Company size and fit (${this.scoringCriteria.companySize}%): Consider if the company size is in our target market.
+- Industry relevance (${this.scoringCriteria.industry}%): How well does the industry align with our solutions?
+- Engagement level (${this.scoringCriteria.engagement}%): Analyze the quality and quantity of interactions.
+- Response timeliness (${this.scoringCriteria.timeliness}%): How quickly do they respond to outreach?
+- Budget indicators (${this.scoringCriteria.budget}%): Any signals about budget availability?
+- Pain points/needs (${this.scoringCriteria.needs}%): Evidence of needs our solution can address?
 
-Based on this information, score this lead from 0-100 where:
-- 0-20: Not a fit or very low probability of conversion
-- 21-40: Low fit, minimal engagement
-- 41-60: Moderate fit, requires nurturing
-- 61-80: Good fit, engaged and showing interest
-- 81-100: Excellent fit, highly engaged and likely to convert
-
-For your response, provide:
-1. A numerical score (0-100)
-2. Your confidence in this score (0-100%)
-3. Your detailed reasoning for this score (be specific about factors influencing the score)
-4. Recommended next actions (up to 3, prioritized as high/medium/low)
-5. Suggested timing for these actions (e.g., "within 24 hours", "next week")
-
-Format your response as valid JSON with the following structure:
+Please provide your analysis strictly in the following JSON format. Do not include any text outside of this JSON structure:
 {
-  "score": number,
-  "confidence": number,
-  "reasoning": "string",
-  "nextActions": [
+  "score": 0, // numerical score from 0-100
+  "reasoning": "detailed explanation of the score",
+  "recommendations": ["recommendation 1", "recommendation 2"], // array of 2-3 recommended actions to improve lead quality
+  "nextSteps": [
     {
-      "type": "email"|"call"|"meeting"|"content_share",
-      "priority": "high"|"medium"|"low",
-      "reason": "string",
-      "suggestedTiming": "string"
+      "action": "specific action to take",
+      "priority": "high", // "high", "medium", or "low"
+      "details": "specifics of the action"
     }
   ]
 }
+
+Base your reasoning only on the information provided and general B2B sales principles. If information is missing, indicate how this affects your confidence in the score within the reasoning.
+Ensure the output is a single, valid JSON object.
 `;
   }
   
-  private formatInteractions(interactions?: Interaction[]): string {
-    if (!interactions || interactions.length === 0) {
-      return 'No previous interactions recorded.';
-    }
+  /**
+   * Update the scoring criteria
+   */
+  updateScoringCriteria(criteria: Partial<Record<string, number>>): void {
+    this.scoringCriteria = { ...this.scoringCriteria, ...criteria };
     
-    return interactions
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()) // Sort by most recent first
-      .map(interaction => {
-        return `- ${new Date(interaction.timestamp).toLocaleDateString()}: ${interaction.type} - ${interaction.details} (Sentiment: ${interaction.sentiment || 'Not analyzed'})`;
-      })
-      .join('
-');
+    // Validate that weights add up to 100
+    const total = Object.values(this.scoringCriteria).reduce((sum, weight) => sum + weight, 0);
+    if (total !== 100) {
+      this.logger.warn(`Scoring criteria weights sum to ${total}, not 100. This may cause unexpected results.`);
+    }
+    // Potentially, you might want to re-normalize weights here if they don't sum to 100, or throw an error.
   }
   
-  private formatPreviousScores(scores?: { timestamp: string; score: number; reason: string }[]): string {
-    if (!scores || scores.length === 0) {
-      return 'No previous scoring history.';
-    }
-    
-    return scores
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()) // Sort by most recent first
-      .map(score => {
-        return `- ${new Date(score.timestamp).toLocaleDateString()}: Score ${score.score} - ${score.reason}`;
-      })
-      .join('
-');
-  }
-  
-  private parseScoringResponse(response: string): ScoringResult {
-    try {
-      const parsed = JSON.parse(response);
-      
-      // Validate the response structure
-      if (
-        typeof parsed.score !== 'number' ||
-        parsed.score < 0 ||
-        parsed.score > 100 ||
-        typeof parsed.confidence !== 'number' ||
-        parsed.confidence < 0 || 
-        parsed.confidence > 100 ||
-        typeof parsed.reasoning !== 'string' ||
-        !Array.isArray(parsed.nextActions)
-      ) {
-        this.logger.warn('Invalid response format from LLM for lead scoring.', parsed);
-        throw new Error('Invalid response format from LLM for lead scoring.');
-      }
-      
-      // Further validation for nextActions items if needed
-      parsed.nextActions.forEach(action => {
-        if (!['email', 'call', 'meeting', 'content_share'].includes(action.type) || 
-            !['high', 'medium', 'low'].includes(action.priority) || 
-            typeof action.reason !== 'string' || 
-            typeof action.suggestedTiming !== 'string') {
-          this.logger.warn('Invalid nextAction item in LLM response.', action);
-          throw new Error('Invalid nextAction item in LLM response.');
-        }
-      });
-
-      return {
-        ...parsed,
-        updatedAt: new Date().toISOString()
-      };
-    } catch (error) {
-      this.logger.error(`Failed to parse LLM scoring response: ${error.message}. Response was: ${response}`);
-      // Fallback or re-throw, depending on desired error handling
-      throw new Error(`Could not parse scoring response: ${error.message}`);
-    }
-  }
-  
-  // This method seems to be a duplicate of one in EmailGenerationAgent. 
-  // Consider moving to a shared utility if it's identical or refactoring if it serves a different purpose here.
-  async generateEmailContent(leadData: LeadDataFromFrontend, purpose: string): Promise<string> {
-    this.logger.info(`Generating email for lead: ${leadData.id} with purpose: ${purpose}`);
-    
-    try {
-      const previousContext = await this.memory.getContext(leadData.id);
-      
-      const prompt = `
-You are an expert B2B sales professional writing an email to a potential lead.
-
-## Lead Information
-- Name: ${leadData.name}
-- Company: ${leadData.company}
-- Position: ${leadData.position || 'Unknown'}
-- Industry: ${leadData.industry || 'Unknown'}
-
-## Previous Interactions
-${this.formatInteractions(leadData.interactions)}
-
-## Purpose of this email
-${purpose}
-
-## Previous Lead Score
-${leadData.previousScores && leadData.previousScores.length > 0 ? leadData.previousScores[0].score : 'No previous score'}
-
-Write a personalized, professional email for this lead that is:
-1. Concise and respectful of their time
-2. Focused on value proposition relevant to their industry and role
-3. Contains a clear call to action
-4. Uses a conversational, not overly formal tone
-5. Does not use generic templates or obvious sales language
-
-Email content only, no subject line needed:
-`;
-
-      const emailContent = await this.llm.complete(prompt);
-      
-      // Log and update memory
-      await this.memory.updateContext(leadData.id, {
-        lastEmailGenerated: {
-          timestamp: new Date().toISOString(),
-          purpose,
-          contentPreview: emailContent.substring(0, 100) + '...' // Store just a preview
-        }
-      });
-      
-      return emailContent;
-    } catch (error) {
-      this.logger.error(`Error generating email for lead ${leadData.id}: ${error.message}`);
-      throw new Error(`Email generation failed: ${error.message}`);
-    }
+  /**
+   * Reset agent memory for a lead
+   */
+  async resetMemory(leadId: string): Promise<void> {
+    // Assuming AgentMemory class has a clearMemory method
+    // If not, this might need to be memory.deleteMemory(leadId) or similar
+    return this.memory.clearMemory(leadId); 
   }
 }
